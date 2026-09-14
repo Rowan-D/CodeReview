@@ -1,0 +1,23 @@
+# Out-of-source CMake builds and generated tooling data
+/build/
+/build-*/
+/cmake-build-*/
+/compile_commands.json
+
+# Accidental in-source CMake output
+/CMakeFiles/
+/CMakeCache.txt
+/cmake_install.cmake
+/CTestTestfile.cmake
+/Testing/
+/Makefile
+/build.ninja
+/.ninja_*
+
+# Local agent state and editor/OS files
+/.agents/
+/.codex/
+*.user
+*.swp
+*.swo
+.DS_Store
