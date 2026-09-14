@@ -53,7 +53,7 @@ private:
         double left = 0, width = 0, labelWidth = 0;
         double top = 0, height = 0, relativeX = 0, relativeY = 0;
         double worldLeft = 0, worldTop = 0, worldWidth = 0, worldHeight = 0;
-        int color = 0, above = -1, partner = -1;
+        int color = 0, above = -1, partner = -1, parent = -1;
     };
     void layoutTree();
     void startRefresh();
@@ -64,6 +64,7 @@ private:
     void layoutBranches();
     void drawBranches(QPainter &p, int node, qsizetype first, qsizetype end, bool labels);
     QRectF treeLabelRect(int node) const;
+    QRectF baseTreeLabelRect(int node) const;
     void applyDocuments(std::vector<Document> docs, bool preserve);
     void layoutScene();
     qsizetype slotAt(double screenX) const;

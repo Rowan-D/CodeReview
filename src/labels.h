@@ -16,6 +16,16 @@ inline QRectF pinnedTreeLabel(const QRectF &subtree, double center, double top,
     return QRectF(std::clamp(center - width / 2, left, right - width), y, width, 22);
 }
 
+// Grow only into the allocated free interval, preserving the original box.
+inline QRectF expandedTreeLabel(const QRectF &box, double desiredWidth, double left, double right) {
+    if (box.isEmpty()) return box;
+    left = std::min(left, box.left()); right = std::max(right, box.right());
+    const double width = std::clamp(desiredWidth, box.width(), right - left);
+    const double x = std::clamp(box.center().x() - width / 2,
+                              std::max(left, box.right() - width), std::min(box.left(), right - width));
+    return QRectF(x, box.top(), width, box.height());
+}
+
 inline double labelFadeAmount(const QString &full, const QFontMetricsF &metrics, double available) {
     const double missing = metrics.horizontalAdvance(full) - available;
     return std::clamp(missing / std::max(1.0, metrics.horizontalAdvance('M') * 6), 0.0, 1.0);

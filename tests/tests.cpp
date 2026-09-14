@@ -77,6 +77,19 @@ int main(int argc, char **argv) {
     }
     check(edgePreview.pixelColor(99, 20).lightness() < 110 && edgePreview.pixelColor(89, 20) == Qt::white,
           "truncation fade is anchored to the box edge, not the last whole glyph");
+    const QRectF narrowLabel(100, 80, 20, 22);
+    const auto widerLabel = expandedTreeLabel(narrowLabel, 100, 90, 200);
+    check(widerLabel.contains(narrowLabel) && widerLabel.width() == 100
+          && widerLabel.top() == 80 && widerLabel.height() == 22,
+          "directory labels use free space without moving their original anchor or row");
+    const auto leftLabel = expandedTreeLabel(narrowLabel, 200, 0, 158);
+    const auto rightLabel = expandedTreeLabel(QRectF(200, 80, 20, 22), 200, 162, 300);
+    check(leftLabel.right() + 4 <= rightLabel.left(),
+          "neighboring expanded labels preserve a gap even when both names are long");
+    check(expandedTreeLabel(narrowLabel, 100, 100, 120) == narrowLabel,
+          "a neighboring file column prevents label expansion");
+    check(expandedTreeLabel(narrowLabel, 10, 0, 200) == narrowLabel,
+          "expansion never shrinks an existing directory label");
     if (argc == 2 && QString::fromLocal8Bit(argv[1]) == "--labels-only") return 0;
     if (argc == 2) {
         std::atomic_bool cancelled{false};

@@ -230,6 +230,7 @@ void Canvas::layoutTree() {
             if (!directories.contains(path)) {
                 int next = int(nodes.size());
                 nodes.push_back({parts[j], -1, 0, 0, j + 1, {}});
+                nodes.back().parent = parent;
                 nodes[parent].children.push_back(next);
                 directories.insert(path, next);
             }
@@ -237,6 +238,7 @@ void Canvas::layoutTree() {
         }
         const int next = int(nodes.size());
         nodes.push_back({parts.last(), i, 0, 0, int(parts.size()), {}});
+        nodes.back().parent = parent;
         nodes[parent].children.push_back(next);
     }
     QHash<QString, int> beforeNodes;
@@ -408,7 +410,7 @@ void Canvas::layoutBranches() {
     }
     sceneWidth = nodes[0].width; layoutScale = scale;
 }
-QRectF Canvas::treeLabelRect(int id) const {
+QRectF Canvas::baseTreeLabelRect(int id) const {
     const auto &n = nodes[id];
     QFont font = codeFont; font.setPixelSize(12); font.setBold(true);
     const double textWidth = QFontMetricsF(font).horizontalAdvance(n.name + '/');
@@ -419,6 +421,35 @@ QRectF Canvas::treeLabelRect(int id) const {
     if (!box.isEmpty() && (box.top() != subtree.top() || std::abs(box.center().x() - center) > 0.01))
         box = pinnedTreeLabel(subtree, center, subtree.top(), n.depth, textWidth + 20, visible);
     return box;
+}
+QRectF Canvas::treeLabelRect(int id) const {
+    const auto &n = nodes[id];
+    const auto box = baseTreeLabelRect(id);
+    // Sticky ancestor rows keep their existing bounds. Natural labels can use
+    // the empty lane beside neighboring directory labels without repacking.
+    if (box.isEmpty() || n.parent < 0 || box.top() != offset.y() + n.top) return box;
+    const auto &parent = nodes[n.parent];
+    double left = std::max(0.0, offset.x() + parent.left);
+    double right = std::min(double(viewport().width()), offset.x() + parent.left + parent.width);
+    const auto it = std::lower_bound(parent.children.begin(), parent.children.end(), n.first,
+        [&](int child, qsizetype slot) { return nodes[child].first < slot; });
+    auto boundary = [&](int sibling, bool before) {
+        const auto &other = nodes[sibling];
+        const auto neighbor = other.document < 0 ? baseTreeLabelRect(sibling) : QRectF();
+        // Split gaps equally so two labels cannot expand into each other.
+        if (!neighbor.isEmpty() && neighbor.top() == box.top())
+            return before ? (neighbor.right() + box.left()) / 2 + 2
+                          : (box.right() + neighbor.left()) / 2 - 2;
+        // Files and differently positioned labels retain their full columns.
+        return offset.x() + other.left + (before ? other.width : 0);
+    };
+    if (it != parent.children.begin()) left = std::max(left, boundary(*(it - 1), true));
+    if (it != parent.children.end() && it + 1 != parent.children.end())
+        right = std::min(right, boundary(*(it + 1), false));
+    QFont font = codeFont; font.setPixelSize(12); font.setBold(true);
+    const bool shifted = std::abs(box.center().x() - (offset.x() + n.left + n.width / 2)) > 0.01;
+    const double desired = QFontMetricsF(font).horizontalAdvance(n.name + '/') + (shifted ? 20 : 8);
+    return expandedTreeLabel(box, desired, left, right);
 }
 void Canvas::drawBranches(QPainter &p, int id, qsizetype first, qsizetype end, bool labels) {
     const auto &n = nodes[id];
@@ -452,7 +483,7 @@ void Canvas::drawBranches(QPainter &p, int id, qsizetype first, qsizetype end, b
             p.setPen(Qt::NoPen); p.setBrush(QColor("#d7e8f4")); p.drawRoundedRect(rect, 3, 3);
             double left = rect.left() + std::min(4.0, rect.width() * 0.08);
             const bool movedY = rect.top() > anchor.y() + 0.01;
-            const bool movedX = std::abs(rect.center().x() - anchor.x()) > 0.01;
+            const bool movedX = std::abs(baseTreeLabelRect(id).center().x() - anchor.x()) > 0.01;
             if ((movedX || movedY) && rect.width() > 24) {
                 p.setPen(QColor("#536b7b"));
                 p.drawText(QPointF(left, rect.top() + metrics.ascent() + 3),
@@ -717,6 +748,17 @@ void Canvas::drawFileHeader(QPainter &p, int id) {
     const QFontMetricsF metrics(label);
     const double labelX = visible.left() + std::min(gutter * scale, visible.width() * 0.1);
     const double available = visible.right() - labelX;
+    if (treeView) {
+        // Continue the incoming stem inside the header, ending beside the name.
+        // The header clip keeps this connection out of neighboring file columns.
+        const double stemX = offset.x() + n.left + std::min(4.0, gutter * scale * 0.25);
+        const double titleY = header.top() + metrics.ascent() * 0.5 + 2;
+        p.setPen(QPen(QColor("#8ca5b8"), 1));
+        if (labelX - 2 > stemX) {
+            drawClippedLine(p, QPointF(stemX, header.top()), QPointF(stemX, titleY), visible);
+            drawClippedLine(p, QPointF(stemX, titleY), QPointF(labelX - 2, titleY), visible);
+        }
+    }
     const QString marker = d.binary ? (collapsed[n.document] ? "▸ " : "▾ ") : "";
     const bool showMarker = binaryControlVisible(id);
     const QString shortened = labelForPainting(n.name, metrics, available - (showMarker ? metrics.horizontalAdvance(marker) : 0), true);

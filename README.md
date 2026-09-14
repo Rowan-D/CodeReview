@@ -75,7 +75,9 @@ Directories and files form branches and leaves on the same 2D canvas. Short sibl
 
 Ancestor labels stay within the visible part of their subtree. When scrolling below them, they pin in depth order beneath the top controls so the directory path remains readable. Arrows indicate labels displaced from their original positions.
 
-Horizontal packing stays fixed during zoom. Minimum header and branch spacing prevents overlapping stacks. Angled connectors meet above child labels, then run straight down within their own gutter or subtree, without sideways hooks. File headers sit just below this fan; their final connector scales from 4 to 48 screen pixels.
+Directory labels expand into spare space beside neighboring directory labels, without moving files or branches. File columns keep their space, and neighboring labels share gaps to avoid overlap.
+
+Horizontal packing stays fixed during zoom. Minimum header and branch spacing prevents overlapping stacks. Angled connectors meet above child labels, then run straight down within their own gutter or subtree. File headers sit just below this fan; their final connector scales from 4 to 48 screen pixels and continues inside the header toward the filename when space permits.
 
 ### Labels
 
