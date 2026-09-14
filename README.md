@@ -73,13 +73,15 @@ Horizontal positions and widths stay fixed in world coordinates and scale exactl
 
 Directories and files form branches and leaves on the same 2D canvas. Short sibling files stack vertically; split comparison pairs stay side by side and stack as a unit.
 
+Ancestor labels stay within the visible part of their subtree. When scrolling below them, they pin in depth order beneath the top controls so the directory path remains readable. Arrows indicate labels displaced from their original positions.
+
 Horizontal packing stays fixed during zoom. Minimum header and branch spacing prevents overlapping stacks. Angled connectors meet above child labels, then run straight down within their own gutter or subtree, without sideways hooks. File headers sit just below this fan; their final connector scales from 4 to 48 screen pixels.
 
 ### Labels
 
 - Directory labels use 12-pixel text, stay at the bar's visible left edge, and use less padding in narrow bars. A left chevron marks labels pinned to the viewport. Trailing directory slashes are optional when space is tight.
 - File labels preserve the extension with a middle ellipsis when a useful prefix also fits. Tiny labels show the first characters without an ellipsis.
-- Shortened labels fade at the visible text edge, darkening as more characters are hidden.
+- Shortened labels fade at the box's visible right edge, darkening as more characters are hidden. Hard clipping uses the full available width, including partial final characters; useful file extensions still use middle elision.
 - Saturated pastel colors distinguish neighboring directories and parents from children. There are no path tooltips.
 
 ## File Display
@@ -178,3 +180,9 @@ Coverage includes:
 | Live updates | Edits, additions, renames, deletions, and advancing HEAD |
 
 Tests also exercise a 10,000-file scene containing a 100,000-line document. They use Qt's offscreen platform; physical trackpad behavior depends on desktop input support.
+
+To run only the isolated label, clipping, and pinning checks without invoking Git:
+
+```sh
+QT_QPA_PLATFORM=offscreen ./build/viewer-tests --labels-only
+```

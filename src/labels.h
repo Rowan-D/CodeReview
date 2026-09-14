@@ -5,6 +5,17 @@
 #include <QPainter>
 #include <QLinearGradient>
 
+inline QRectF pinnedTreeLabel(const QRectF &subtree, double center, double top,
+                             int depth, double desiredWidth, const QRectF &viewport) {
+    const double left = std::max(subtree.left(), viewport.left());
+    const double right = std::min(subtree.right(), viewport.right());
+    if (right <= left || subtree.bottom() < viewport.top()) return {};
+    const double width = std::min(desiredWidth, right - left);
+    const double y = std::max(top, viewport.top() + depth * 24);
+    if (y >= viewport.bottom()) return {};
+    return QRectF(std::clamp(center - width / 2, left, right - width), y, width, 22);
+}
+
 inline double labelFadeAmount(const QString &full, const QFontMetricsF &metrics, double available) {
     const double missing = metrics.horizontalAdvance(full) - available;
     return std::clamp(missing / std::max(1.0, metrics.horizontalAdvance('M') * 6), 0.0, 1.0);
@@ -68,4 +79,12 @@ inline QString compactLabel(const QString &name, const QFontMetricsF &metrics,
         return name.left(boundary.toNextBoundary());
     }
     return beginning;
+}
+
+// Hard truncation uses the painter's box clip, including partial final glyphs.
+// Keep middle elision when it preserves a useful file extension.
+inline QString labelForPainting(const QString &name, const QFontMetricsF &metrics,
+                                double available, bool file) {
+    const auto shortened = compactLabel(name, metrics, available, file);
+    return name.startsWith(shortened) ? name : shortened;
 }

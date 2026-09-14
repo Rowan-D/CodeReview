@@ -56,6 +56,28 @@ int main(int argc, char **argv) {
         drawClippedLine(painter, QPointF(-1000000, 10), QPointF(1000000, 10), QRectF(0, 0, 100, 20));
     }
     check(longLine.pixelColor(50, 10) == Qt::black, "tree edges with distant offscreen endpoints survive raster clipping");
+    const QRectF labelViewport(0, 34, 800, 500);
+    const auto distantParent = pinnedTreeLabel(QRectF(-500, -100, 5000, 3000), 2000, -100, 0, 120, labelViewport);
+    const auto distantChild = pinnedTreeLabel(QRectF(-200, -50, 2000, 2000), 800, -50, 1, 100, labelViewport);
+    check(labelViewport.contains(distantParent) && labelViewport.contains(distantChild),
+          "offscreen ancestor labels remain inside the viewport");
+    check(distantParent.bottom() < distantChild.top(), "pinned ancestors keep distinct depth rows");
+    const auto natural = pinnedTreeLabel(QRectF(100, 100, 200, 400), 200, 100, 1, 80, labelViewport);
+    check(natural.center().x() == 200 && natural.top() == 100, "visible tree labels retain their original position");
+    check(pinnedTreeLabel(QRectF(-400, 100, 200, 400), -300, 100, 1, 80, labelViewport).isEmpty(),
+          "unrelated offscreen subtrees do not add pinned labels");
+    check(labelForPainting("controller", labelMetrics, labelMetrics.horizontalAdvance("contr") + 2, false) == "controller",
+          "hard clipping uses the full box width including the partial final character");
+    QImage edgePreview(100, 22, QImage::Format_RGB32); edgePreview.fill(Qt::white);
+    {
+        QPainter painter(&edgePreview); painter.setClipRect(QRect(0, 0, 100, 22));
+        painter.setFont(labelFont); painter.setPen(Qt::black);
+        painter.drawText(QPointF(4, 15), labelForPainting("long_controller_name", labelMetrics, 96, false));
+        drawLabelFade(painter, QRectF(0, 0, 100, 22), 1);
+    }
+    check(edgePreview.pixelColor(99, 20).lightness() < 110 && edgePreview.pixelColor(89, 20) == Qt::white,
+          "truncation fade is anchored to the box edge, not the last whole glyph");
+    if (argc == 2 && QString::fromLocal8Bit(argv[1]) == "--labels-only") return 0;
     if (argc == 2) {
         std::atomic_bool cancelled{false};
         Canvas preview(argv[1]); preview.resize(1100, 820); preview.show();

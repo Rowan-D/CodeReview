@@ -408,6 +408,18 @@ void Canvas::layoutBranches() {
     }
     sceneWidth = nodes[0].width; layoutScale = scale;
 }
+QRectF Canvas::treeLabelRect(int id) const {
+    const auto &n = nodes[id];
+    QFont font = codeFont; font.setPixelSize(12); font.setBold(true);
+    const double textWidth = QFontMetricsF(font).horizontalAdvance(n.name + '/');
+    const QRectF subtree(offset.x() + n.left, offset.y() + n.top, n.width, n.height);
+    const QRectF visible(0, 34, viewport().width(), viewport().height() - 34);
+    const double center = subtree.center().x();
+    auto box = pinnedTreeLabel(subtree, center, subtree.top(), n.depth, textWidth + 8, visible);
+    if (!box.isEmpty() && (box.top() != subtree.top() || std::abs(box.center().x() - center) > 0.01))
+        box = pinnedTreeLabel(subtree, center, subtree.top(), n.depth, textWidth + 20, visible);
+    return box;
+}
 void Canvas::drawBranches(QPainter &p, int id, qsizetype first, qsizetype end, bool labels) {
     const auto &n = nodes[id];
     if (n.document >= 0 || n.last <= first || n.first >= end) return;
@@ -431,19 +443,28 @@ void Canvas::drawBranches(QPainter &p, int id, qsizetype first, qsizetype end, b
         }
         drawBranches(p, *it, first, end, labels);
     }
-    if (labels && anchor.y() + 24 >= 34 && anchor.y() < viewport().height()) {
-        QFont font = codeFont; font.setPixelSize(12); font.setBold(true); p.setFont(font);
-        const QFontMetricsF metrics(font);
-        const double padding = std::min(4.0, n.width * 0.08);
-        const double available = std::max(0.0, n.width - 2 * padding);
-        const QString caption = metrics.horizontalAdvance(n.name + '/') <= available ? n.name + '/' : n.name;
-        const QString title = compactLabel(caption, metrics, available, false);
-        const double w = std::min(available, metrics.horizontalAdvance(title));
-        const QRectF rect(anchor.x() - w / 2 - padding, anchor.y(), w + 2 * padding, 22);
-        p.setClipRect(rect, Qt::IntersectClip);
-        p.setPen(Qt::NoPen); p.setBrush(QColor("#d7e8f4")); p.drawRoundedRect(rect, 3, 3);
-        p.setPen(QColor("#304655")); p.drawText(QPointF(anchor.x() - w / 2, anchor.y() + metrics.ascent() + 3), title);
-        drawLabelFade(p, QRectF(anchor.x() - w / 2, anchor.y(), w, 22), labelFadeAmount(caption, metrics, available));
+    if (labels) {
+        const auto rect = treeLabelRect(id);
+        if (!rect.isEmpty()) {
+            QFont font = codeFont; font.setPixelSize(12); font.setBold(true); p.setFont(font);
+            const QFontMetricsF metrics(font);
+            p.setClipRect(rect, Qt::IntersectClip);
+            p.setPen(Qt::NoPen); p.setBrush(QColor("#d7e8f4")); p.drawRoundedRect(rect, 3, 3);
+            double left = rect.left() + std::min(4.0, rect.width() * 0.08);
+            const bool movedY = rect.top() > anchor.y() + 0.01;
+            const bool movedX = std::abs(rect.center().x() - anchor.x()) > 0.01;
+            if ((movedX || movedY) && rect.width() > 24) {
+                p.setPen(QColor("#536b7b"));
+                p.drawText(QPointF(left, rect.top() + metrics.ascent() + 3),
+                    movedY ? "↑" : anchor.x() < rect.center().x() ? "‹" : "›");
+                left += 12;
+            }
+            const double available = rect.right() - left;
+            const QString caption = metrics.horizontalAdvance(n.name + '/') <= available ? n.name + '/' : n.name;
+            const QString title = labelForPainting(caption, metrics, available, false);
+            p.setPen(QColor("#304655")); p.drawText(QPointF(left, rect.top() + metrics.ascent() + 3), title);
+            drawLabelFade(p, rect, labelFadeAmount(caption, metrics, available));
+        }
     }
     p.restore();
 }
@@ -625,14 +646,14 @@ void Canvas::drawDirectories(QPainter &p, int id, qsizetype first, qsizetype end
             p.setPen(QColor("#536b7b"));
             p.drawText(QPointF(left, baseline), "‹"); left += 12;
         }
-        const double available = visible.right() - padding - left;
+        const double available = visible.right() - left;
         if (available > 0) {
             p.setClipRect(QRectF(left, box.top(), available, box.height()), Qt::IntersectClip);
             p.setPen(QColor("#304655"));
             const QString caption = metrics.horizontalAdvance(n.name + '/') <= available ? n.name + '/' : n.name;
-            const QString title = compactLabel(caption, metrics, available, false);
+            const QString title = labelForPainting(caption, metrics, available, false);
             p.drawText(QPointF(left, baseline), title);
-            drawLabelFade(p, QRectF(left, box.top(), std::min(available, metrics.horizontalAdvance(title)), box.height()),
+            drawLabelFade(p, QRectF(left, box.top(), available, box.height()),
                           labelFadeAmount(caption, metrics, available));
         }
         p.restore();
@@ -698,7 +719,7 @@ void Canvas::drawFileHeader(QPainter &p, int id) {
     const double available = visible.right() - labelX;
     const QString marker = d.binary ? (collapsed[n.document] ? "▸ " : "▾ ") : "";
     const bool showMarker = binaryControlVisible(id);
-    const QString shortened = compactLabel(n.name, metrics, available - (showMarker ? metrics.horizontalAdvance(marker) : 0), true);
+    const QString shortened = labelForPainting(n.name, metrics, available - (showMarker ? metrics.horizontalAdvance(marker) : 0), true);
     const QString title = (showMarker ? marker : QString()) + shortened;
     p.setPen(QColor("#444b52"));
     p.drawText(QPointF(labelX, header.top() + metrics.ascent() + 2), title);
@@ -707,7 +728,7 @@ void Canvas::drawFileHeader(QPainter &p, int id) {
     p.setPen(QColor("#167039")); p.drawText(QPointF(labelX, header.top() + metrics.ascent() + 18), added);
     p.setPen(QColor("#b42e38"));
     p.drawText(QPointF(labelX + QFontMetricsF(stats).horizontalAdvance(added + " "), header.top() + metrics.ascent() + 18), QString("−%1").arg(d.removed));
-    drawLabelFade(p, QRectF(labelX, header.top(), std::min(available, metrics.horizontalAdvance(title)), metrics.height() + 4),
+    drawLabelFade(p, QRectF(labelX, header.top(), available, metrics.height() + 4),
                   labelFadeAmount(n.name, metrics, available - (showMarker ? metrics.horizontalAdvance(marker) : 0)));
     drawLabelFade(p, QRectF(labelX, header.top() + metrics.ascent() + 7, available, 13),
                   labelFadeAmount(added + QString(" −%1").arg(d.removed), QFontMetricsF(stats), available));

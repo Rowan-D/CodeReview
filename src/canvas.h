@@ -63,6 +63,7 @@ private:
     void positionControls();
     void layoutBranches();
     void drawBranches(QPainter &p, int node, qsizetype first, qsizetype end, bool labels);
+    QRectF treeLabelRect(int node) const;
     void applyDocuments(std::vector<Document> docs, bool preserve);
     void layoutScene();
     qsizetype slotAt(double screenX) const;
