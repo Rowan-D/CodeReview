@@ -153,8 +153,8 @@ WorkspaceSnapshot renderWorkspace(WorkspaceSnapshot snapshot, ViewOptions option
         auto finish = [&](Document d, int side) {
             d.added = added; d.removed = removed; d.changed = patch != nullptr;
             d.comparisonSide = side;
-            d.layoutColumns = std::max(current ? current->columns : 0, patch ? patch->columns : 0);
-            d.layoutRows = std::max(current ? current->rowCount() + removed : removed + 1, d.rowCount());
+            d.layoutColumns = options.changesOnly ? d.columns : std::max(current ? current->columns : 0, patch ? patch->columns : 0);
+            d.layoutRows = options.changesOnly ? d.rowCount() : std::max(current ? current->rowCount() + removed : removed + 1, d.rowCount());
             d.renderKey = baseKey + QByteArray::number(side);
             snapshot.rendered.push_back(std::move(d));
         };

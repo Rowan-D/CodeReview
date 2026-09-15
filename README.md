@@ -26,7 +26,7 @@ cmake --install build --prefix /your/install/path
 
 ### View Toggles
 
-The independent, checkable toggles are at the top right. Each button shows its shortcut.
+Checkboxes at the top right show each option's name and shortcut. Larger checkbox indicators and guide lines make the hierarchy easier to follow; backgrounds cover only the controls themselves. Disclosure arrows expand child options: Split and Changes only under Diff, and Wrap tall files under Fit. Children start collapsed; their shortcuts work while hidden, and collapsing a group preserves its settings.
 
 | Toggle | Key | Behavior |
 | --- | --- | --- |
@@ -34,8 +34,12 @@ The independent, checkable toggles are at the top right. Each button shows its s
 | Split | S | Show aligned HEAD and working copies side by side, with highlighting on or off. |
 | Changes only | C | Hide unchanged files and collapse distant unchanged lines, keeping three context lines around changes. |
 | Tree | T | Switch between directory bars and branches with vertically stacked short files. |
+| Fit | F | Fit the content width, up to 100% zoom, as the window, files, or layout change. Vertical scrolling preserves Fit and its wrapping; horizontal movement or zooming turns it off. |
+| Wrap tall files | W | While Fit is active, flow tall files into adjacent continuation columns to reduce their height. Off by default; remembered when Fit turns off. |
 
-Toggles preserve zoom and keep a nearby file anchored during layout changes. Press **F** to fit after switching layouts if needed.
+With Fit off, layout and comparison toggles preserve zoom and keep a nearby file anchored during layout changes.
+
+Fit wrapping preserves source text, line numbers, syntax colors, and diff alignment. Each file keeps one header; continuation columns show their starting line. Split comparisons alternate HEAD/work columns, with red/green markers, so corresponding sections remain adjacent. Wrapping uses a bounded layout adjustment and shared text caches. It attempts to fit the height as well as the width; exceptionally deep directory trees or very large files may still require scrolling. Horizontal navigation or zooming restores the ordinary single-column file layout. Vertical scrolling keeps the fitted width and continuation columns, including through resize and content updates.
 
 ### Navigation
 
@@ -49,7 +53,7 @@ Toggles preserve zoom and keep a nearby file anchored during layout changes. Pre
 | Shift + wheel | Pan horizontally |
 | Ctrl (or Command) + wheel / trackpad pinch | Zoom around a file/text position |
 | Double-click | Return to readable 100% zoom |
-| F | Fit the layout |
+| F | Toggle automatic fitting |
 | F11 | Toggle fullscreen; restore the previous window state on exit |
 | 0 | Reset to 100% |
 | Home | Return to nearby file headers |
@@ -73,6 +77,8 @@ Horizontal positions and widths stay fixed in world coordinates and scale exactl
 
 Directories and files form branches and leaves on the same 2D canvas. Short sibling files stack vertically; split comparison pairs stay side by side and stack as a unit.
 
+Changes only sizes the tree from the displayed diff rows, without reserving space for hidden unchanged content.
+
 Ancestor labels stay within the visible part of their subtree. When scrolling below them, they pin in depth order beneath the top controls so the directory path remains readable. Arrows indicate labels displaced from their original positions.
 
 Directory labels expand into spare space beside neighboring directory labels, without moving files or branches. File columns keep their space, and neighboring labels share gaps to avoid overlap.
@@ -83,6 +89,7 @@ Horizontal packing stays fixed during zoom. Minimum header and branch spacing pr
 
 - Directory labels use 12-pixel text, stay at the bar's visible left edge, and use less padding in narrow bars. A left chevron marks labels pinned to the viewport. Trailing directory slashes are optional when space is tight.
 - File labels preserve the extension with a middle ellipsis when a useful prefix also fits. Tiny labels show the first characters without an ellipsis.
+- File headers can extend into nearby empty space in either layout, without moving or widening the code. Neighboring code and headers limit expansion; split copies keep one shared name. Pinned file headers retain their original bounds.
 - Shortened labels fade at the box's visible right edge, darkening as more characters are hidden. Hard clipping uses the full available width, including partial final characters; useful file extensions still use middle elision.
 - Saturated pastel colors distinguish neighboring directories and parents from children. There are no path tooltips.
 
@@ -187,4 +194,10 @@ To run only the isolated label, clipping, and pinning checks without invoking Gi
 
 ```sh
 QT_QPA_PLATFORM=offscreen ./build/viewer-tests --labels-only
+```
+
+To check filename expansion, width fitting, continuation columns, collapsed checkbox groups, filtered diff sizing, and manual camera controls using in-memory scenes without invoking Git:
+
+```sh
+QT_QPA_PLATFORM=offscreen ./build/viewer-tests --canvas-only
 ```

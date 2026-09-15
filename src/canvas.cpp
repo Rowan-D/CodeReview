@@ -10,6 +10,8 @@
 #include <QHash>
 #include <QSet>
 #include <QSignalBlocker>
+#include <QStyleOptionButton>
+#include <QStyle>
 #include <QTextLayout>
 #include <QtConcurrent>
 #include <algorithm>
@@ -17,13 +19,41 @@
 #include <functional>
 
 namespace {
+class OutlinedCheckBox : public QCheckBox {
+public:
+    using QCheckBox::QCheckBox;
+protected:
+    void paintEvent(QPaintEvent *event) override {
+        QCheckBox::paintEvent(event);
+        QStyleOptionButton option;
+        initStyleOption(&option);
+        const QRect indicator = style()->subElementRect(QStyle::SE_CheckBoxIndicator, &option, this);
+        QPainter painter(this);
+        // Cover the native indicator before drawing a consistent outline and
+        // checkmark; keep native label rendering, hit testing and accessibility.
+        painter.fillRect(indicator, Qt::white);
+        painter.setRenderHint(QPainter::Antialiasing);
+        const QRectF box = QRectF(indicator).adjusted(1, 1, -1, -1);
+        painter.setPen(QPen(QColor(underMouse() ? "#8e9aa5" : "#a9b1b8"), 2));
+        painter.setBrush(QColor(isChecked() ? "#eaf3fa" : "#f8f9fa"));
+        painter.drawRoundedRect(box, 3, 3);
+        if (isChecked()) {
+            painter.setPen(QPen(QColor("#50687b"), 2.3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            painter.drawPolyline(QPolygonF{
+                QPointF(box.left() + box.width() * .22, box.top() + box.height() * .51),
+                QPointF(box.left() + box.width() * .43, box.top() + box.height() * .73),
+                QPointF(box.left() + box.width() * .79, box.top() + box.height() * .27)});
+        }
+    }
+};
+
 double smooth(double low, double high, double value) {
     const double t = std::clamp((value - low) / (high - low), 0.0, 1.0);
     return t * t * (3 - 2 * t);
 }
 }
 
-Canvas::Canvas(const QString &directory) : root(directory) {
+Canvas::Canvas(const QString &directory, bool watchDirectory) : liveEnabled(watchDirectory), root(directory) {
     setWindowTitle("CodeReview · Directory boxes — " + root);
     setMinimumSize(640, 360);
     setFocusPolicy(Qt::StrongFocus);
@@ -56,22 +86,43 @@ Canvas::Canvas(const QString &directory) : root(directory) {
     for (int axis = 0; axis < 2; ++axis) {
         auto *bar = axis ? vertical : horizontal;
         connect(bar, &QScrollBar::valueChanged, this, [this, axis](int value) {
+            if (!axis) disableFit();
             const double position = scrollLow[axis] + (scrollHigh[axis] - scrollLow[axis]) * value / 1000000.0;
             (axis ? offset.ry() : offset.rx()) = -position * scale;
-            changed();
+            changed(false);
         });
     }
+    controlPanel = new QWidget(this);
+    controlPanel->setStyleSheet("QWidget { background: transparent; color: #304655; }");
     auto button = [&](const QString &name, const QString &text, int option) {
-        auto *b = new QToolButton(this);
-        b->setObjectName(name); b->setText(text); b->setCheckable(true); b->setFocusPolicy(Qt::NoFocus);
-        b->setStyleSheet("QToolButton { background: #f4f6f8; color: #304655; border: 1px solid #bbc8d3; border-radius: 4px; padding: 3px 7px; } QToolButton:checked { background: #8dc8f0; border-color: #548db4; }");
-        connect(b, &QToolButton::clicked, this, [this, option] { toggleOption(option); });
+        auto *b = new OutlinedCheckBox(controlPanel);
+        b->setObjectName(name); b->setText(text); b->setFocusPolicy(Qt::NoFocus);
+        b->setStyleSheet("QCheckBox { spacing: 5px; background: rgba(255,255,255,100); border-radius: 3px; } QCheckBox::indicator { width: 18px; height: 18px; }");
+        connect(b, &QCheckBox::clicked, this, [this, option] { toggleOption(option); });
         return b;
     };
     viewToggle = button("diffToggle", "Diff [D]", 0);
     splitToggle = button("splitToggle", "Split [S]", 1);
     changesToggle = button("changesToggle", "Changes only [C]", 2);
     treeToggle = button("treeToggle", "Tree [T]", 3);
+    fitToggle = button("fitToggle", "Fit [F]", 4);
+    wrapToggle = button("wrapToggle", "Wrap tall files [W]", 5);
+    auto expander = [&](const QString &name) {
+        auto *b = new QToolButton(controlPanel); b->setObjectName(name);
+        b->setCheckable(true); b->setArrowType(Qt::RightArrow); b->setAutoRaise(true);
+        b->setAccessibleName(name == "diffExpand" ? "Expand diff options" : "Expand fit options");
+        b->setStyleSheet("QToolButton { border: none; background: transparent; }");
+        b->setFocusPolicy(Qt::NoFocus);
+        connect(b, &QToolButton::toggled, this, [this, b](bool open) {
+            b->setArrowType(open ? Qt::DownArrow : Qt::RightArrow); positionControls();
+        });
+        return b;
+    };
+    diffExpand = expander("diffExpand"); fitExpand = expander("fitExpand");
+    for (const auto &name : {"diffGuide", "fitGuide"}) {
+        auto *guide = new QLabel(controlPanel); guide->setObjectName(name);
+        guide->setAttribute(Qt::WA_TransparentForMouseEvents);
+    }
     globalInfo = new QLabel(this);
     globalInfo->setObjectName("globalInfo"); globalInfo->setTextFormat(Qt::RichText);
     globalInfo->setStyleSheet("QLabel { color: #304655; background: white; }");
@@ -107,8 +158,7 @@ Canvas::Canvas(const QString &directory) : root(directory) {
     });
     refreshTimer.setInterval(1000);
     connect(&refreshTimer, &QTimer::timeout, this, &Canvas::startRefresh);
-    refreshTimer.start();
-    startRefresh();
+    if (liveEnabled) { refreshTimer.start(); startRefresh(); }
 }
 Canvas::~Canvas() { refreshTimer.stop(); cancelled = true; watcher.waitForFinished(); }
 void Canvas::startRefresh() {
@@ -123,6 +173,16 @@ void Canvas::startRefresh() {
 void Canvas::toggleDiff() { toggleOption(0); }
 void Canvas::toggleOption(int option) {
     stopAutoscroll();
+    if (option == 5) {
+        wrapFit = !wrapFit;
+        if (fitView) fit();
+        updateControls(); return;
+    }
+    if (option == 4) {
+        if (fitView) disableFit(); else fitView = true;
+        if (fitView) { dragging = false; fit(true); }
+        updateControls(); return;
+    }
     if (option == 0) diffView = !diffView;
     if (option == 1) splitView = !splitView;
     if (option == 2) changesOnly = !changesOnly;
@@ -140,6 +200,7 @@ void Canvas::updateControls() {
     if (!viewToggle) return;
     viewToggle->setChecked(diffView); splitToggle->setChecked(splitView);
     changesToggle->setChecked(changesOnly); treeToggle->setChecked(treeView);
+    fitToggle->setChecked(fitView); wrapToggle->setChecked(wrapFit);
     const QString status = workspace.status.isEmpty() ? QString("%1 files · HEAD").arg(workspace.files.size()) : QString("No Git diff");
     globalInfo->setText(status + QString("  <span style='color:#167039'>+%1</span> <span style='color:#b42e38'>−%2</span>")
         .arg(workspace.added).arg(workspace.removed));
@@ -147,12 +208,44 @@ void Canvas::updateControls() {
     positionControls();
 }
 void Canvas::positionControls() {
-    int right = width() - 18;
-    for (auto *button : {treeToggle, changesToggle, splitToggle, viewToggle}) if (button) {
-        const int w = button->sizeHint().width();
-        button->setGeometry(right - w, 3, w, 26); right -= w + 5;
-    }
-    if (globalInfo) globalInfo->setGeometry(8, 3, std::max(0, right - 12), 26);
+    if (!controlPanel || !fitExpand) return;
+    int panelWidth = 0;
+    int y = 0;
+    auto row = [&](QCheckBox *box, QToolButton *expand, int depth) {
+        const int x = 20 + depth * 18;
+        const int width = box->sizeHint().width() + 4;
+        box->setGeometry(x, y, width, 24); box->show();
+        panelWidth = std::max(panelWidth, x + width);
+        if (expand) expand->setGeometry(x - 20, y + 2, 18, 20);
+        y += 24;
+    };
+    row(viewToggle, diffExpand, 0);
+    splitToggle->hide(); changesToggle->hide();
+    if (diffExpand->isChecked()) { row(splitToggle, nullptr, 1); row(changesToggle, nullptr, 1); }
+    row(treeToggle, nullptr, 0);
+    row(fitToggle, fitExpand, 0);
+    wrapToggle->hide();
+    if (fitExpand->isChecked()) row(wrapToggle, nullptr, 1);
+    auto guide = [&](const char *name, QCheckBox *first, QCheckBox *last, bool open) {
+        auto *label = controlPanel->findChild<QLabel *>(name);
+        label->setVisible(open);
+        if (!open) return;
+        const int top = first->y(), bottom = last->y() + 12;
+        QPixmap lines(18, bottom - top + 1); lines.fill(Qt::transparent);
+        QPainter p(&lines); p.setPen(QPen(QColor("#8397a8"), 1));
+        p.drawLine(3, 0, 3, bottom - top);
+        for (int row = 12; row <= bottom - top; row += 24) p.drawLine(3, row, 16, row);
+        p.end(); label->setPixmap(lines); label->setGeometry(20, top, 18, lines.height());
+    };
+    guide("diffGuide", splitToggle, changesToggle, diffExpand->isChecked());
+    guide("fitGuide", wrapToggle, wrapToggle, fitExpand->isChecked());
+    controlPanel->setGeometry(width() - panelWidth - 18, 3, panelWidth, y);
+    QRegion controls;
+    for (auto *child : controlPanel->findChildren<QWidget *>(QString(), Qt::FindDirectChildrenOnly))
+        if (!child->isHidden()) controls += child->geometry();
+    controlPanel->setMask(controls);
+    controlPanel->raise();
+    if (globalInfo) globalInfo->setGeometry(8, 3, std::max(0, width() - panelWidth - 38), 26);
 }
 QRect Canvas::viewport() const { return QRect(0, 0, width() - 12, height() - 12); }
 void Canvas::resizeEvent(QResizeEvent *) {
@@ -288,7 +381,7 @@ void Canvas::layoutScene() {
         for (auto it = nodes.rbegin(); it != nodes.rend(); ++it) {
             auto &n = *it;
             if (n.document >= 0)
-                n.worldWidth = gutter + std::clamp(std::max(documents[n.document].columns, documents[n.document].layoutColumns), 12, 100) * cell + 40;
+                n.worldWidth = fileColumnWidth(int(&n - nodes.data())) * fileColumns(int(&n - nodes.data()));
             else {
                 n.worldWidth = 0;
                 for (int child : n.children) n.worldWidth += nodes[child].worldWidth;
@@ -306,7 +399,7 @@ void Canvas::layoutScene() {
         n.width = n.worldWidth * scale;
         n.top = n.depth * rowHeight;
         n.height = n.document < 0 ? rowHeight : headerHeight(scale)
-            + (collapsed[n.document] ? 0 : documents[n.document].rowCount() * lineHeight * scale);
+            + (collapsed[n.document] ? 0 : bodyRows(int(&n - nodes.data())) * lineHeight * scale);
     }
     for (auto it = nodes.rbegin(); it != nodes.rend(); ++it)
         for (int child : it->children)
@@ -327,9 +420,8 @@ void Canvas::layoutBranches() {
             auto &n = *it;
             n.above = n.partner = -1;
             if (n.document >= 0) {
-                const auto &d = documents[n.document];
-                n.worldWidth = gutter + std::clamp(std::max(d.columns, d.layoutColumns), 12, 100) * cell + 40;
-                n.worldHeight = 42 + (collapsed[n.document] ? 0 : std::max(d.rowCount(), d.layoutRows) * lineHeight);
+                n.worldWidth = fileColumnWidth(int(&n - nodes.data())) * fileColumns(int(&n - nodes.data()));
+                n.worldHeight = 42 + (collapsed[n.document] ? 0 : bodyRows(int(&n - nodes.data()), true) * lineHeight);
                 continue;
             }
             double x = 20, columnWidth = 0, stackHeight = 0, bottom = 64;
@@ -373,8 +465,7 @@ void Canvas::layoutBranches() {
         auto &n = *it;
         n.left = n.worldLeft * scale; n.width = n.worldWidth * scale;
         if (n.document >= 0) {
-            const auto &d = documents[n.document];
-            n.height = headerHeight(scale) + (collapsed[n.document] ? 0 : std::max(d.rowCount(), d.layoutRows) * lineHeight * scale);
+            n.height = headerHeight(scale) + (collapsed[n.document] ? 0 : bodyRows(int(&n - nodes.data()), true) * lineHeight * scale);
         } else {
             n.height = lane;
             for (int child : n.children) {
@@ -530,7 +621,7 @@ int Canvas::directoryCount() const {
 QRectF Canvas::leafRect(qsizetype slot) const {
     const auto &n = nodes[leaves[slot]];
     return QRectF(n.worldLeft, n.top / scale, n.worldWidth - 24,
-                  headerHeight(scale) / scale + (collapsed[n.document] ? 0 : double(documents[n.document].rowCount()) * lineHeight));
+                  headerHeight(scale) / scale + (collapsed[n.document] ? 0 : double(bodyRows(int(&n - nodes.data()))) * lineHeight));
 }
 QRectF Canvas::fileRect(const QString &path, int side) const {
     for (qsizetype i = 0; i < qsizetype(leaves.size()); ++i)
@@ -595,12 +686,18 @@ void Canvas::constrainCamera() {
     scrollBottom = bottom;
     offset.setY(std::clamp(offset.y(), std::min(-margin, margin - bottom), double(viewport().height()) - margin));
 }
-void Canvas::changed() {
+void Canvas::changed(bool refit) {
+    if (fitView && refit) { fit(); return; }
     layoutScene(); tallest = sceneHeight(scale) / scale;
     constrainCamera(); syncScrollbars(); update();
 }
+void Canvas::panBy(QPointF delta) {
+    if (delta.x() != 0) disableFit();
+    offset += delta; changed(false);
+}
 void Canvas::zoomAt(double factor, QPointF anchor) {
     if (!std::isfinite(factor) || factor <= 0) return;
+    disableFit();
     const double next = std::clamp(scale * factor, 1e-6, 8.0);
     if (leaves.empty()) { scale = next; changed(); return; }
     // Bar heights scale logarithmically. Keep the same file/source position
@@ -622,16 +719,103 @@ void Canvas::zoomAt(double factor, QPointF anchor) {
     offset.setY(anchor.y() - nodes[leaves[slot]].top - headerHeight(scale) - row * lineHeight * scale);
     changed();
 }
-void Canvas::fit() {
-    if (documents.empty()) return;
-    double low = 1e-6, high = 1;
-    for (int i = 0; i < 28; ++i) {
-        scale = (low + high) / 2; layoutScene();
-        if (sceneWidth <= viewport().width() - 48 && sceneHeight(scale) <= viewport().height() - 80) low = scale;
-        else high = scale;
+double Canvas::fileColumnWidth(int id) const {
+    const auto &d = documents[nodes[id].document];
+    return gutter + std::clamp(std::max(d.columns, d.layoutColumns), 12, 100) * cell + 40;
+}
+qsizetype Canvas::bodyRows(int id, bool reserve) const {
+    const auto &n = nodes[id];
+    const auto &d = documents[n.document];
+    if (wrapRows > 0 && !collapsed[n.document]) {
+        const auto target = std::max(wrapRows, (d.rowCount() + 1023) / 1024);
+        const auto columns = std::max<qsizetype>(1, (d.rowCount() + target - 1) / target);
+        return (d.rowCount() + columns - 1) / columns;
     }
-    scale = low > 1.1e-6 ? low : 0.03;
-    offset = {24, 56}; changed();
+    return reserve ? std::max(d.rowCount(), d.layoutRows) : d.rowCount();
+}
+double Canvas::columnLeft(int id, int column) const {
+    const auto &n = nodes[id];
+    if (!wrapRows || n.partner < 0) return n.worldLeft + column * fileColumnWidth(id);
+    const int before = documents[n.document].comparisonSide < 0 ? id : n.partner;
+    const int after = nodes[before].partner;
+    return nodes[before].worldLeft + column * (fileColumnWidth(before) + fileColumnWidth(after))
+        + (id == after ? fileColumnWidth(before) : 0);
+}
+std::vector<QRectF> Canvas::fileColumnRects(const QString &path, int side) const {
+    std::vector<QRectF> result;
+    for (int id : leaves) if (documents[nodes[id].document].path == path
+        && (!side || documents[nodes[id].document].comparisonSide == side)) {
+        for (int column = 0; column < fileColumns(id); ++column)
+            result.emplace_back(columnLeft(id, column), nodes[id].top / scale,
+                                fileColumnWidth(id) - 24, nodes[id].height / scale);
+        break;
+    }
+    return result;
+}
+int Canvas::fileColumns(int id) const {
+    const auto &n = nodes[id];
+    if (!wrapRows || collapsed[n.document]) return 1;
+    const auto rows = std::max<qsizetype>(1, bodyRows(id));
+    return int((documents[n.document].rowCount() + rows - 1) / rows);
+}
+void Canvas::fit(bool resetPosition) {
+    if (documents.empty()) { syncScrollbars(); update(); return; }
+    wrapRows = 0;
+    auto fitWidth = [&] {
+        layoutScale = -1; layoutScene();
+        const double worldWidth = sceneWidth / scale;
+        scale = std::clamp((viewport().width() - 48) / std::max(1.0, worldWidth), 1e-6, 1.0);
+        layoutScene();
+    };
+    fitWidth();
+    if (wrapFit) {
+        // Balance continuation columns against width-based zoom. This bounded
+        // refinement only changes geometry; source text and glyph tiles are shared.
+        for (int pass = 0; pass < 8; ++pass) {
+            double overflow = 1;
+            qsizetype longest = 1;
+            for (int id : leaves) if (!collapsed[nodes[id].document]) {
+                const auto rows = bodyRows(id);
+                longest = std::max(longest, rows);
+                const double available = std::max(24.0, viewport().height() - 80 - nodes[id].top - headerHeight(scale));
+                overflow = std::max(overflow, rows * lineHeight * scale / available);
+            }
+            if (overflow <= 1 || longest <= 1) break;
+            const auto nextRows = std::max<qsizetype>(1, qsizetype(longest / std::sqrt(overflow)));
+            if (nextRows == wrapRows) break;
+            wrapRows = nextRows;
+            fitWidth();
+        }
+    }
+    offset = {24, resetPosition ? 56 : offset.y()};
+    updateBounds();
+    tallest = sceneHeight(scale) / scale;
+    constrainCamera(); syncScrollbars(); update();
+}
+void Canvas::disableFit() {
+    fitView = false;
+    if (fitToggle) fitToggle->setChecked(false);
+    if (!wrapRows || leaves.empty()) { wrapRows = 0; return; }
+    // Keep the source position near the viewport center when unfolding columns.
+    const auto point = viewport().center();
+    int id = leaves[slotNear(point)];
+    int column = 0;
+    if (nodes[id].partner >= 0) {
+        const int before = documents[nodes[id].document].comparisonSide < 0 ? id : nodes[id].partner;
+        const int after = nodes[before].partner;
+        const double step = fileColumnWidth(before) + fileColumnWidth(after);
+        const double local = (point.x() - offset.x()) / scale - nodes[before].worldLeft;
+        column = std::clamp(int(local / step), 0, fileColumns(before) - 1);
+        id = local - column * step < fileColumnWidth(before) ? before : after;
+    } else {
+        column = std::clamp(int((point.x() - offset.x() - nodes[id].left) / (fileColumnWidth(id) * scale)), 0, fileColumns(id) - 1);
+    }
+    const auto &n = nodes[id];
+    const double row = column * bodyRows(id) + std::clamp((point.y() - offset.y() - n.top - headerHeight(scale)) / (lineHeight * scale), 0.0, double(bodyRows(id)));
+    const double x = point.x() - offset.x() - columnLeft(id, column) * scale;
+    wrapRows = 0; updateBounds();
+    offset = QPointF(point.x() - nodes[id].left - x, point.y() - nodes[id].top - headerHeight(scale) - row * lineHeight * scale);
+    changed();
 }
 double Canvas::directoryHeight() const {
     // Uniform screen-space height across every depth. Logarithmic scaling keeps
@@ -706,18 +890,62 @@ QRectF Canvas::headerRect(qsizetype slot) const {
 QRectF Canvas::sharedHeaderRect(int id) const {
     const auto &n = nodes[id];
     double left = n.left, right = n.left + n.width - 24 * scale;
-    double bottom = n.top + headerHeight(scale) + (collapsed[n.document] ? 0 : documents[n.document].rowCount() * lineHeight * scale);
+    double bottom = n.top + headerHeight(scale) + (collapsed[n.document] ? 0 : bodyRows(int(&n - nodes.data())) * lineHeight * scale);
     if (n.partner >= 0) {
         const auto &other = nodes[n.partner];
         left = std::min(left, other.left); right = std::max(right, other.left + other.width - 24 * scale);
-        bottom = std::max(bottom, other.top + headerHeight(scale) + (collapsed[other.document] ? 0 : documents[other.document].rowCount() * lineHeight * scale));
+        bottom = std::max(bottom, other.top + headerHeight(scale) + (collapsed[other.document] ? 0 : bodyRows(n.partner) * lineHeight * scale));
     }
     const double y = std::min(std::max(34.0, offset.y() + n.top), offset.y() + bottom - headerHeight(scale));
     return QRectF(offset.x() + left, y, right - left, headerHeight(scale));
 }
 QRectF Canvas::fileHeaderRect(const QString &path) const {
-    for (int id : leaves) if (documents[nodes[id].document].path == path) return sharedHeaderRect(id);
+    for (int id : leaves) if (documents[nodes[id].document].path == path) return expandedFileHeaderRect(id);
     return {};
+}
+QRectF Canvas::expandedFileHeaderRect(int id) const {
+    const auto &n = nodes[id];
+    const auto header = sharedHeaderRect(id);
+    if (wrapRows || n.parent < 0 || header.top() != offset.y() + n.top || header.right() <= 0
+        || header.left() >= viewport().width()) return header;
+    QFont font = codeFont; font.setPixelSize(std::clamp(int(14 * scale), 12, 22));
+    const double padding = std::min(gutter * scale, header.width() * 0.1);
+    const double desired = QFontMetricsF(font).horizontalAdvance(n.name)
+        + padding + (documents[n.document].binary ? QFontMetricsF(font).horizontalAdvance("▸ ") : 0);
+    const auto &parent = nodes[n.parent];
+    double right = std::min({header.left() + desired, double(viewport().width()),
+                            offset.x() + parent.left + parent.width});
+    if (right <= header.right()) return header;
+    auto obstruct = [&](const QRectF &rect) {
+        if (rect.bottom() > header.top() && rect.top() < header.bottom() && rect.right() > header.right())
+            right = std::min(right, std::max(header.right(), rect.left() - 3));
+    };
+    const auto current = std::lower_bound(parent.children.begin(), parent.children.end(), n.first,
+        [&](int child, qsizetype slot) { return nodes[child].first < slot; });
+    int inspected = 0;
+    auto inspect = [&](int child) {
+        if (child == id || child == n.partner) return;
+        const auto &other = nodes[child];
+        obstruct(QRectF(offset.x() + other.left, offset.y() + other.top, other.width, other.height));
+        if (other.document >= 0) obstruct(sharedHeaderRect(child));
+        else if (treeView) obstruct(treeLabelRect(child));
+    };
+    // Earlier stacked files can be wider than their immediate neighbors. Look
+    // back a full split-pair width; directory subtrees form disjoint columns.
+    for (auto it = current; it != parent.children.begin();) {
+        const auto &other = nodes[*--it];
+        if (++inspected > 128) return header;
+        inspect(*it);
+        if (other.document < 0 || other.left + 2 * stride * scale < n.left) break;
+    }
+    for (auto it = current; it != parent.children.end(); ++it) {
+        if (offset.x() + nodes[*it].left > right) break;
+        if (++inspected > 128) return header;
+        inspect(*it);
+    }
+    auto expanded = header;
+    expanded.setRight(std::max(header.right(), right));
+    return expanded;
 }
 bool Canvas::binaryControlVisible(int id) const {
     const auto &n = nodes[id];
@@ -733,20 +961,23 @@ bool Canvas::binaryControlVisible(int id) const {
 void Canvas::drawFileHeader(QPainter &p, int id) {
     const auto &n = nodes[id];
     const auto &d = documents[n.document];
-    const auto header = sharedHeaderRect(id);
+    const auto originalHeader = sharedHeaderRect(id);
+    const auto header = expandedFileHeaderRect(id);
     if (header.bottom() < 34 || header.top() > viewport().height()) return;
     const auto visible = header.intersected(QRectF(0, 34, viewport().width(), viewport().height() - 34));
     if (visible.isEmpty()) return;
     p.save(); p.setClipRect(visible, Qt::IntersectClip);
     p.fillRect(header, Qt::white);
     if (n.partner >= 0) {
-        const double divider = offset.x() + nodes[n.partner].left;
-        p.fillRect(QRectF(header.left(), header.bottom() - 2, divider - header.left(), 2), QColor("#c9747d"));
-        p.fillRect(QRectF(divider, header.bottom() - 2, header.right() - divider, 2), QColor("#66a87b"));
+        for (int part : {id, n.partner}) for (int column = 0; column < fileColumns(part); ++column) {
+            const double x = offset.x() + columnLeft(part, column) * scale;
+            p.fillRect(QRectF(x, header.bottom() - 2, (fileColumnWidth(part) - 24) * scale, 2),
+                       QColor(documents[nodes[part].document].comparisonSide < 0 ? "#c9747d" : "#66a87b"));
+        }
     }
     QFont label = codeFont; label.setPixelSize(std::clamp(int(14 * scale), 12, 22)); p.setFont(label);
     const QFontMetricsF metrics(label);
-    const double labelX = visible.left() + std::min(gutter * scale, visible.width() * 0.1);
+    const double labelX = visible.left() + std::min(gutter * scale, std::min(visible.width(), originalHeader.width()) * 0.1);
     const double available = visible.right() - labelX;
     if (treeView) {
         // Continue the incoming stem inside the header, ending beside the name.
@@ -770,6 +1001,18 @@ void Canvas::drawFileHeader(QPainter &p, int id) {
     p.setPen(QColor("#167039")); p.drawText(QPointF(labelX, header.top() + metrics.ascent() + 18), added);
     p.setPen(QColor("#b42e38"));
     p.drawText(QPointF(labelX + QFontMetricsF(stats).horizontalAdvance(added + " "), header.top() + metrics.ascent() + 18), QString("−%1").arg(d.removed));
+    for (int part : {id, n.partner}) if (part >= 0) {
+        for (int column = 1; column < fileColumns(part); ++column) {
+            const auto row = column * bodyRows(part);
+            const double x = offset.x() + columnLeft(part, column) * scale;
+            const double width = fileColumnWidth(part) * scale;
+            p.save(); p.setClipRect(QRectF(x, header.top(), width, header.height()), Qt::IntersectClip);
+            p.setPen(QColor("#6b8da8"));
+            p.drawText(QPointF(x + 2, header.top() + metrics.ascent() + 18),
+                       QString("↳ %1").arg(documents[nodes[part].document].rowNumber(row)));
+            p.restore();
+        }
+    }
     drawLabelFade(p, QRectF(labelX, header.top(), available, metrics.height() + 4),
                   labelFadeAmount(n.name, metrics, available - (showMarker ? metrics.horizontalAdvance(marker) : 0)));
     drawLabelFade(p, QRectF(labelX, header.top() + metrics.ascent() + 7, available, 13),
@@ -845,71 +1088,78 @@ void Canvas::paintEvent(QPaintEvent *) {
             const auto &n = nodes[leaves[slot]];
             const auto &d = documents[n.document];
             const QRectF world = leafRect(slot);
-            const double x = offset.x() + world.x() * scale;
             const double top = offset.y() + world.y() * scale;
-            const double bottom = top + world.height() * scale;
-            if (bottom < 0 || top > viewport().height()) continue;
-            const QRectF header = headerRect(slot);
-            const double originY = top + headerHeight(scale);
-            const double clipTop = std::max(0.0, header.bottom());
-            if (!collapsed[n.document] && clipTop < viewport().height()) {
-                const auto rowFirst = qsizetype(std::clamp(std::floor((clipTop - originY) / (lineHeight * scale)), 0.0, double(d.rowCount())));
-                const auto rowEnd = qsizetype(std::clamp(std::ceil((viewport().height() - originY) / (lineHeight * scale)), 0.0, double(d.rowCount())));
-                p.save();
-                p.setClipRect(QRectF(x, clipTop, world.width() * scale, viewport().height() - clipTop), Qt::IntersectClip);
-                const double overviewWeight = 1 - smooth(0.12, 0.24, scale);
-                const double liveWeight = smooth(0.40, 0.60, scale);
-                const double tileWeight = 1 - overviewWeight - liveWeight;
-                p.setRenderHint(QPainter::SmoothPixmapTransform);
-                if (overviewWeight > 0 && !d.overview.isEmpty()) {
-                    const double fullHeight = d.rowCount() * lineHeight * scale;
-                    const double y1 = std::max(clipTop, originY);
-                    const double y2 = std::min(double(viewport().height()), bottom);
-                    // Continuous mip blending; choose by horizontal footprint so tall
-                    // files do not lose all their horizontal text detail.
-                    const double lod = std::clamp(std::log2(1 / std::max(1e-9, cell * scale)), 0.0, double(d.overviewLevels.size()));
-                    const int level = int(std::floor(lod));
-                    const double fraction = lod - level;
-                    auto drawLevel = [&](int index, double opacity) {
-                        if (opacity <= 0 || y2 <= y1) return;
-                        int w = 100, h = int(d.overview.size() / 100);
-                        for (int i = 0; i < index; ++i) { w = (w + 1) / 2; h = (h + 1) / 2; }
-                        const bool colored = !d.overviewColor.isEmpty();
-                        const auto &pixels = colored ? (index ? d.overviewColorLevels[index - 1] : d.overviewColor)
-                                                     : (index ? d.overviewLevels[index - 1] : d.overview);
-                        const QImage ink(reinterpret_cast<const uchar *>(pixels.constData()), w, h, w * (colored ? 4 : 1),
-                                         colored ? QImage::Format_RGB32 : QImage::Format_Grayscale8);
-                        p.setOpacity(opacity);
-                        p.drawImage(QRectF(x + gutter * scale, y1, std::max(1.0, 100 * cell * scale), y2 - y1), ink,
-                            QRectF(0, (y1 - originY) / fullHeight * h, w, (y2 - y1) / fullHeight * h));
-                    };
-                    drawLevel(level, overviewWeight);
-                    if (fraction > 0) drawLevel(level + 1, overviewWeight * fraction);
-                }
-                if (tileWeight > 0) {
-                    p.setOpacity(tileWeight);
-                    for (qsizetype tile = rowFirst / 64; tile * 64 < rowEnd; ++tile) {
-                        const auto &image = textTile(n.document, tile);
-                        const qsizetype count = std::min<qsizetype>(64, d.rowCount() - tile * 64);
-                        p.drawImage(QRectF(x + gutter * scale, originY + tile * 64 * lineHeight * scale,
-                                         100 * cell * scale, count * lineHeight * scale), image);
+            const double wholeBottom = top + world.height() * scale;
+            if (wholeBottom < 0 || top > viewport().height()) continue;
+            for (int column = 0; column < fileColumns(leaves[slot]); ++column) {
+                const double x = offset.x() + columnLeft(leaves[slot], column) * scale;
+                const double columnWidth = (fileColumnWidth(leaves[slot]) - 24) * scale;
+                if (x > viewport().width() || x + columnWidth < 0) continue;
+                const qsizetype segmentStart = column * bodyRows(leaves[slot]);
+                const qsizetype segmentEnd = std::min(d.rowCount(), segmentStart + bodyRows(leaves[slot]));
+                const double bottom = top + headerHeight(scale) + (segmentEnd - segmentStart) * lineHeight * scale;
+                const QRectF header = headerRect(slot);
+                const double originY = top + headerHeight(scale) - segmentStart * lineHeight * scale;
+                const double clipTop = std::max(0.0, header.bottom());
+                if (!collapsed[n.document] && clipTop < viewport().height()) {
+                    const auto rowFirst = qsizetype(std::clamp(std::floor((clipTop - originY) / (lineHeight * scale)), double(segmentStart), double(segmentEnd)));
+                    const auto rowEnd = qsizetype(std::clamp(std::ceil((viewport().height() - originY) / (lineHeight * scale)), double(segmentStart), double(segmentEnd)));
+                    p.save();
+                    p.setClipRect(QRectF(x, clipTop, columnWidth, std::max(0.0, std::min(double(viewport().height()), bottom) - clipTop)), Qt::IntersectClip);
+                    const double overviewWeight = 1 - smooth(0.12, 0.24, scale);
+                    const double liveWeight = smooth(0.40, 0.60, scale);
+                    const double tileWeight = 1 - overviewWeight - liveWeight;
+                    p.setRenderHint(QPainter::SmoothPixmapTransform);
+                    if (overviewWeight > 0 && !d.overview.isEmpty()) {
+                        const double fullHeight = d.rowCount() * lineHeight * scale;
+                        const double y1 = std::max(clipTop, originY);
+                        const double y2 = std::min(double(viewport().height()), bottom);
+                        // Continuous mip blending; choose by horizontal footprint so tall
+                        // files do not lose all their horizontal text detail.
+                        const double lod = std::clamp(std::log2(1 / std::max(1e-9, cell * scale)), 0.0, double(d.overviewLevels.size()));
+                        const int level = int(std::floor(lod));
+                        const double fraction = lod - level;
+                        auto drawLevel = [&](int index, double opacity) {
+                            if (opacity <= 0 || y2 <= y1) return;
+                            int w = 100, h = int(d.overview.size() / 100);
+                            for (int i = 0; i < index; ++i) { w = (w + 1) / 2; h = (h + 1) / 2; }
+                            const bool colored = !d.overviewColor.isEmpty();
+                            const auto &pixels = colored ? (index ? d.overviewColorLevels[index - 1] : d.overviewColor)
+                                                         : (index ? d.overviewLevels[index - 1] : d.overview);
+                            const QImage ink(reinterpret_cast<const uchar *>(pixels.constData()), w, h, w * (colored ? 4 : 1),
+                                             colored ? QImage::Format_RGB32 : QImage::Format_Grayscale8);
+                            p.setOpacity(opacity);
+                            p.drawImage(QRectF(x + gutter * scale, y1, std::max(1.0, 100 * cell * scale), y2 - y1), ink,
+                                QRectF(0, (y1 - originY) / fullHeight * h, w, (y2 - y1) / fullHeight * h));
+                        };
+                        drawLevel(level, overviewWeight);
+                        if (fraction > 0) drawLevel(level + 1, overviewWeight * fraction);
                     }
-                }
-                if (liveWeight > 0) {
-                    p.setOpacity(liveWeight);
-                    p.translate(x, originY + double(rowFirst) * lineHeight * scale);
-                    p.scale(scale, scale);
-                    for (qsizetype row = rowFirst; row < rowEnd; ++row) {
-                        const double y = double(row - rowFirst) * lineHeight + ascent;
-                        p.setPen(QColor("#999999"));
-                        const QString number = d.rowNumber(row);
-                        p.drawText(QPointF(gutter - 12 - QFontMetricsF(codeFont).horizontalAdvance(number), y), number);
-                        p.save(); p.translate(gutter, 0);
-                        drawTextRow(p, d, row, y);
-                        p.restore();
+                    if (tileWeight > 0) {
+                        p.setOpacity(tileWeight);
+                        for (qsizetype tile = rowFirst / 64; tile * 64 < rowEnd; ++tile) {
+                            const auto &image = textTile(n.document, tile);
+                            const qsizetype count = std::min<qsizetype>(64, d.rowCount() - tile * 64);
+                            p.drawImage(QRectF(x + gutter * scale, originY + tile * 64 * lineHeight * scale,
+                                             100 * cell * scale, count * lineHeight * scale), image);
+                        }
                     }
+                    if (liveWeight > 0) {
+                        p.setOpacity(liveWeight);
+                        p.translate(x, originY + double(rowFirst) * lineHeight * scale);
+                        p.scale(scale, scale);
+                        for (qsizetype row = rowFirst; row < rowEnd; ++row) {
+                            const double y = double(row - rowFirst) * lineHeight + ascent;
+                            p.setPen(QColor("#999999"));
+                            const QString number = d.rowNumber(row);
+                            p.drawText(QPointF(gutter - 12 - QFontMetricsF(codeFont).horizontalAdvance(number), y), number);
+                            p.save(); p.translate(gutter, 0);
+                            drawTextRow(p, d, row, y);
+                            p.restore();
+                        }
+                    }
+                    p.restore();
                 }
-                p.restore();
             }
         }
         // Draw pair-wide headers after both bodies. Either visible half can
@@ -943,7 +1193,7 @@ void Canvas::wheelEvent(QWheelEvent *e) {
         zoomAt(std::exp(delta.y() * 0.008), e->position());
     else {
         if (e->modifiers() & Qt::ShiftModifier) delta = {delta.y(), delta.x()};
-        offset += delta; changed();
+        panBy(delta);
     }
     e->accept();
 }
@@ -960,7 +1210,7 @@ void Canvas::tickAutoscroll() {
     };
     const QPointF displacement = scrollPointer - scrollAnchor;
     const QPointF movement(velocity(displacement.x()) * dt, velocity(displacement.y()) * dt);
-    if (!movement.isNull()) { offset -= movement; changed(); }
+    if (!movement.isNull()) panBy(-movement);
 }
 void Canvas::mousePressEvent(QMouseEvent *e) {
     setFocus();
@@ -990,7 +1240,7 @@ void Canvas::mouseMoveEvent(QMouseEvent *e) {
         scrollPointer = e->position();
         if (middleHeld && QLineF(scrollAnchor, scrollPointer).length() > 12) middleMoved = true;
     } else if (dragging) {
-        offset += e->position() - lastMouse; lastMouse = e->position(); changed();
+        panBy(e->position() - lastMouse); lastMouse = e->position();
     }
 }
 void Canvas::mouseReleaseEvent(QMouseEvent *e) {
@@ -1009,8 +1259,7 @@ void Canvas::keyPressEvent(QKeyEvent *e) {
     if (autoScroll) stopAutoscroll();
     if (e->modifiers() & Qt::ControlModifier) {
         if (e->key() == Qt::Key_U || e->key() == Qt::Key_D) {
-            offset.ry() += (e->key() == Qt::Key_U ? 1 : -1) * viewport().height() * 0.5;
-            changed(); e->accept(); return;
+            panBy(QPointF(0, (e->key() == Qt::Key_U ? 1 : -1) * viewport().height() * 0.5)); e->accept(); return;
         }
     }
     if (!(e->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier))) {
@@ -1019,6 +1268,8 @@ void Canvas::keyPressEvent(QKeyEvent *e) {
         case Qt::Key_S: toggleOption(1); return;
         case Qt::Key_C: toggleOption(2); return;
         case Qt::Key_T: toggleOption(3); return;
+        case Qt::Key_F: toggleOption(4); return;
+        case Qt::Key_W: toggleOption(5); return;
         default: break;
         }
     }
@@ -1028,11 +1279,13 @@ void Canvas::keyPressEvent(QKeyEvent *e) {
         if (isFullScreen()) setWindowState(beforeFullscreen);
         else { beforeFullscreen = windowState(); showFullScreen(); }
         break;
-    case Qt::Key_F: fit(); break;
     case Qt::Key_0:
+        disableFit();
         scale = 1; offset = {24, 56};
         changed(); break;
     case Qt::Key_Home:
+        if (fitView) { offset.setY(56); changed(false); break; }
+        disableFit();
         if (!leaves.empty()) {
             const auto &node = nodes[leaves[slotNear(viewport().center())]];
             const double left = offset.x() + node.left;
@@ -1041,14 +1294,14 @@ void Canvas::keyPressEvent(QKeyEvent *e) {
             offset.setY(24 - node.top);
         }
         changed(); break;
-    case Qt::Key_PageUp: offset.ry() += viewport().height() * 0.9; changed(); break;
-    case Qt::Key_PageDown: offset.ry() -= viewport().height() * 0.9; changed(); break;
+    case Qt::Key_PageUp: panBy(QPointF(0, viewport().height() * 0.9)); break;
+    case Qt::Key_PageDown: panBy(QPointF(0, -viewport().height() * 0.9)); break;
     case Qt::Key_Plus: case Qt::Key_Equal: zoomAt(1.2, viewport().center()); break;
     case Qt::Key_Minus: zoomAt(1 / 1.2, viewport().center()); break;
-    case Qt::Key_Left: offset.rx() += 100; changed(); break;
-    case Qt::Key_Right: offset.rx() -= 100; changed(); break;
-    case Qt::Key_Up: offset.ry() += 100; changed(); break;
-    case Qt::Key_Down: offset.ry() -= 100; changed(); break;
+    case Qt::Key_Left: disableFit(); offset.rx() += 100; changed(); break;
+    case Qt::Key_Right: disableFit(); offset.rx() -= 100; changed(); break;
+    case Qt::Key_Up: panBy(QPointF(0, 100)); break;
+    case Qt::Key_Down: panBy(QPointF(0, -100)); break;
     default: QWidget::keyPressEvent(e);
     }
 }
@@ -1063,7 +1316,7 @@ bool Canvas::event(QEvent *e) {
             zoomAt(1 + gesture->value(), gesture->position()); e->accept(); return true;
         }
         if (gesture->gestureType() == Qt::PanNativeGesture) {
-            offset += gesture->delta(); changed(); e->accept(); return true;
+            panBy(gesture->delta()); e->accept(); return true;
         }
     }
     return QWidget::event(e);

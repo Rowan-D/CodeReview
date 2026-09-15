@@ -20,6 +20,11 @@ void write(const QString &path, const QByteArray &bytes) {
     QFile f(path); check(f.open(QIODevice::WriteOnly), "create fixture");
     check(f.write(bytes) == bytes.size(), "write fixture");
 }
+void fitOnce(Canvas &canvas) {
+    // Older navigation checks need a fitted starting point with a free camera.
+    if (!canvas.isFitView()) QTest::keyClick(&canvas, Qt::Key_F);
+    QTest::keyClick(&canvas, Qt::Key_F);
+}
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
     QFont labelFont("monospace"); labelFont.setPixelSize(12);
@@ -91,12 +96,217 @@ int main(int argc, char **argv) {
     check(expandedTreeLabel(narrowLabel, 10, 0, 200) == narrowLabel,
           "expansion never shrinks an existing directory label");
     if (argc == 2 && QString::fromLocal8Bit(argv[1]) == "--labels-only") return 0;
+    if (argc == 2 && QString::fromLocal8Bit(argv[1]) == "--canvas-only") {
+        // In-memory scenes exercise real camera/layout events without scanning
+        // a directory or launching the Git-backed refresh worker.
+        Canvas scene("fixture", false); scene.resize(1100, 820); scene.show();
+        const QString longName = "dir/a_very_long_filename_that_can_use_the_empty_space.cpp";
+        auto fixtures = [&] {
+            return std::vector<Document>{decode(longName, "short\n"),
+                decode("dir/b_wide.cpp", QByteArray(90, 'x') + '\n'),
+                decode("dir/c_tall.cpp", QByteArray("code\n").repeated(45))};
+        };
+        scene.setDocuments(fixtures());
+        QTest::keyClick(&scene, Qt::Key_T);
+        const auto original = scene.fileRect(longName);
+        const auto expanded = scene.fileHeaderRect(longName);
+        check(expanded.width() > original.width() * scene.zoom() + 20,
+              "file names expand into empty space above wider stacked files");
+        const auto neighbor = scene.fileRect("dir/c_tall.cpp");
+        check(expanded.right() < scene.camera().x() + neighbor.left() * scene.zoom(),
+              "expanded file headers stop before neighboring code columns");
+        check(scene.fileRect(longName) == original, "filename expansion leaves file geometry unchanged");
+        auto *fitButton = scene.findChild<QCheckBox *>("fitToggle");
+        check(fitButton && !fitButton->isChecked(), "Fit starts disabled and has a visible control");
+        QTest::mouseClick(fitButton, Qt::LeftButton, Qt::NoModifier, QPoint(8, 12));
+        check(scene.isFitView() && fitButton->isChecked(), "Fit button enables persistent fitting");
+        const double largeZoom = scene.zoom();
+        scene.resize(700, 440); QCoreApplication::processEvents();
+        check(scene.isFitView() && scene.zoom() < largeZoom, "Fit follows window resizing");
+        const double beforeEdit = scene.zoom();
+        auto edited = fixtures(); edited.push_back(decode("dir/d_new.cpp", QByteArray("new line\n").repeated(250)));
+        scene.setDocuments(std::move(edited));
+        check(scene.isFitView() && scene.zoom() < beforeEdit, "Fit follows replacement content and newly added files");
+        QTest::keyClick(&scene, Qt::Key_W);
+        for (const auto &path : {longName, QString("dir/d_new.cpp")}) {
+            const auto rect = scene.fileRect(path);
+            check(scene.camera().x() + rect.right() * scene.zoom() <= scene.width() - 12
+                  && scene.camera().y() + rect.bottom() * scene.zoom() <= scene.height() - 12,
+                  "fitted content stays inside the resized viewport");
+        }
+        QTest::keyClick(&scene, Qt::Key_T);
+        check(scene.isFitView(), "layout toggles retain Fit");
+        QTest::keyClick(&scene, Qt::Key_F);
+        check(!scene.isFitView(), "F toggles Fit off");
+        auto enableFit = [&] { if (!scene.isFitView()) QTest::keyClick(&scene, Qt::Key_F); };
+        for (auto key : {Qt::Key_Plus, Qt::Key_0, Qt::Key_Left}) {
+            enableFit(); QTest::keyClick(&scene, key);
+            check(!scene.isFitView() && !fitButton->isChecked(), "manual keyboard navigation disables Fit");
+        }
+        enableFit(); QTest::keyClick(&scene, Qt::Key_D, Qt::ControlModifier);
+        check(scene.isFitView(), "half-page navigation preserves Fit");
+        enableFit();
+        QWheelEvent wheel(QPointF(300, 200), scene.mapToGlobal(QPoint(300, 200)), QPoint(0, -30),
+                          QPoint(), Qt::NoButton, Qt::NoModifier, Qt::ScrollUpdate, false);
+        QApplication::sendEvent(&scene, &wheel);
+        check(scene.isFitView(), "vertical trackpad scrolling preserves Fit");
+        enableFit();
+        QNativeGestureEvent pinch(Qt::ZoomNativeGesture, QPointingDevice::primaryPointingDevice(), 2,
+            QPointF(300, 200), QPointF(300, 200), QPointF(300, 200), 0.1, {}, 0);
+        QApplication::sendEvent(&scene, &pinch);
+        check(!scene.isFitView(), "pinch zoom disables Fit");
+        enableFit();
+        QNativeGestureEvent pan(Qt::PanNativeGesture, QPointingDevice::primaryPointingDevice(), 2,
+            QPointF(300, 200), QPointF(300, 200), QPointF(300, 200), 0, QPointF(10, 10), 0);
+        QApplication::sendEvent(&scene, &pan);
+        check(!scene.isFitView(), "native trackpad panning disables Fit");
+        enableFit(); QTest::mouseDClick(&scene, Qt::LeftButton, Qt::NoModifier, QPoint(300, 200));
+        check(!scene.isFitView(), "double-click zoom disables Fit");
+        enableFit(); QTest::mouseClick(&scene, Qt::MiddleButton, Qt::NoModifier, QPoint(300, 200));
+        check(scene.isFitView() && scene.autoscrolling(), "middle-click waits for movement before disabling Fit");
+        QTest::keyClick(&scene, Qt::Key_F);
+        enableFit(); check(!scene.autoscrolling(), "enabling Fit stops autoscroll");
+        QTest::mousePress(&scene, Qt::LeftButton, Qt::NoModifier, QPoint(300, 300));
+        QTest::mouseMove(&scene, QPoint(320, 310));
+        QTest::mouseRelease(&scene, Qt::LeftButton, Qt::NoModifier, QPoint(320, 310));
+        check(!scene.isFitView(), "dragging disables Fit");
+        scene.setDocuments(fixtures()); scene.resize(1100, 820);
+        QTest::keyClick(&scene, Qt::Key_T); enableFit();
+        scene.grab().save("/tmp/code-review-fit-labels.png");
+        auto before = decode(longName, "short\n"); before.comparisonSide = -1;
+        auto after = before; after.comparisonSide = 1;
+        scene.setDocuments({before, after, decode("dir/b_wide.cpp", QByteArray(90, 'x') + '\n')});
+        const auto beforeRect = scene.fileRect(longName, -1), afterRect = scene.fileRect(longName, 1);
+        check(scene.fileHeaderRect(longName).width() >= beforeRect.united(afterRect).width() * scene.zoom(),
+              "split copies retain one header spanning both files");
+        scene.grab();
+        scene.setDocuments({});
+        check(scene.isFitView(), "Fit remains enabled when the last file disappears");
+        scene.setDocuments(fixtures());
+        check(scene.isFitView(), "Fit resumes when content appears again");
+        QTest::keyClick(&scene, Qt::Key_T); QTest::keyClick(&scene, Qt::Key_0);
+        const auto flameFile = scene.fileRect(longName);
+        const auto flameHeader = scene.fileHeaderRect(longName);
+        check(flameHeader.width() > flameFile.width() * scene.zoom(),
+              "filenames also use the small gaps between flame-view file columns");
+        check(flameHeader.right() < scene.camera().x() + scene.fileRect("dir/b_wide.cpp").left() * scene.zoom(),
+              "flame-view filename expansion does not cover the next file");
+        enableFit();
+        auto *bar = scene.findChild<QScrollBar *>("horizontalScrollBar");
+        bar->setRange(0, 1000000); bar->setValue(500000);
+        check(!scene.isFitView(), "scrollbar movement disables Fit");
+        Canvas wrapped("wrapping", false); wrapped.resize(1100, 820); wrapped.show();
+        auto *wrapBox = wrapped.findChild<QCheckBox *>("wrapToggle");
+        auto *splitBox = wrapped.findChild<QCheckBox *>("splitToggle");
+        check(wrapBox->isHidden() && splitBox->isHidden(), "child checkbox options start collapsed");
+        QTest::mouseClick(wrapped.findChild<QToolButton *>("fitExpand"), Qt::LeftButton);
+        check(!wrapBox->isHidden() && !wrapped.isFitView(), "expanding Fit options does not change Fit state");
+        QTest::mouseClick(wrapped.findChild<QToolButton *>("diffExpand"), Qt::LeftButton);
+        check(!splitBox->isHidden(), "Diff children can be expanded independently");
+        QByteArray longSource;
+        for (int row = 1; row <= 400; ++row) longSource += "int line_" + QByteArray::number(row) + " = " + QByteArray::number(row) + ";\n";
+        wrapped.setDocuments({decode("src/long.cpp", longSource)});
+        QTest::keyClick(&wrapped, Qt::Key_T); QTest::keyClick(&wrapped, Qt::Key_F);
+        const auto unwrapped = wrapped.fileRect("src/long.cpp");
+        check(wrapped.zoom() > 0.9 && unwrapped.height() * wrapped.zoom() > wrapped.height(),
+              "width-only Fit does not shrink the scene to accommodate a tall file");
+        QTest::keyClick(&wrapped, Qt::Key_W);
+        const auto columns = wrapped.fileRect("src/long.cpp");
+        check(columns.width() > unwrapped.width() * 2 && columns.height() * wrapped.zoom() < wrapped.height(),
+              "Fit wrapping gives tall files adjacent continuation columns");
+        check(columns.width() * wrapped.zoom() <= wrapped.width() - 48,
+              "wrapped columns still fit the viewport width");
+        wrapped.grab().save("/tmp/code-review-wrapped-tree.png");
+        const double wrappedZoom = wrapped.zoom();
+        wrapped.resize(1100, 1200); QCoreApplication::processEvents();
+        check(wrapped.isFitView() && wrapped.zoom() >= wrappedZoom,
+              "a taller window rebalances continuation columns without reducing text size");
+        wrapped.resize(1100, 820); QCoreApplication::processEvents();
+        QTest::keyClick(&wrapped, Qt::Key_T);
+        wrapped.grab().save("/tmp/code-review-wrapped-boxes.png");
+        QTest::keyClick(&wrapped, Qt::Key_Plus);
+        check(!wrapped.isFitView() && wrapped.fileRect("src/long.cpp").width() == unwrapped.width()
+              && wrapBox->isChecked(), "manual navigation unfolds files while remembering the wrapping preference");
+        QTest::keyClick(&wrapped, Qt::Key_W);
+        check(!wrapped.isFitView() && wrapped.fileRect("src/long.cpp").width() == unwrapped.width(),
+              "wrapping does not affect the free camera");
+        WorkspaceSnapshot snapshot;
+        snapshot.files = {decode("src/changed.cpp", QByteArray("same\n").repeated(499) + "new\n" + QByteArray("same\n").repeated(500))};
+        snapshot.patches = {decode("src/changed.cpp", "@@ -500 +500 @@\n-old\n+new\n", {}, true)};
+        std::atomic_bool noCancel{false};
+        const auto compact = renderWorkspace(snapshot, {true, false, true}, noCancel);
+        check(compact.rendered.size() == 1 && compact.rendered[0].rowCount() < 20
+              && compact.rendered[0].layoutRows == compact.rendered[0].rowCount(),
+              "Changes only removes full-file height reservations from the tree layout");
+        const auto splitCompact = renderWorkspace(snapshot, {true, true, true}, noCancel);
+        check(splitCompact.rendered.size() == 2
+              && splitCompact.rendered[0].layoutRows == splitCompact.rendered[0].rowCount()
+              && splitCompact.rendered[1].layoutRows == splitCompact.rendered[1].rowCount(),
+              "Changes only also compacts both sides of a split comparison");
+        wrapped.setDocuments(compact.rendered);
+        QTest::keyClick(&wrapped, Qt::Key_T); QTest::keyClick(&wrapped, Qt::Key_F);
+        check(wrapped.fileRect("src/changed.cpp").height() * wrapped.zoom() < 400,
+              "a filtered tree uses only the displayed diff rows");
+        QTest::keyClick(&wrapped, Qt::Key_W);
+        auto oldCopy = decode("src/pair.cpp", longSource); oldCopy.comparisonSide = -1;
+        auto newCopy = oldCopy; newCopy.comparisonSide = 1;
+        wrapped.setDocuments({oldCopy, newCopy});
+        const auto oldColumns = wrapped.fileRect("src/pair.cpp", -1);
+        const auto newColumns = wrapped.fileRect("src/pair.cpp", 1);
+        check(oldColumns.height() == newColumns.height() && oldColumns.right() < newColumns.left(),
+              "wrapped split comparisons keep aligned rows and disjoint copies");
+        const auto heads = wrapped.fileColumnRects("src/pair.cpp", -1);
+        const auto works = wrapped.fileColumnRects("src/pair.cpp", 1);
+        check(heads.size() > 1 && heads.size() == works.size(), "split wrapping has matched continuation columns");
+        for (size_t column = 0; column < heads.size(); ++column) {
+            check(heads[column].right() < works[column].left(), "each HEAD column precedes its working counterpart");
+            if (column + 1 < heads.size())
+                check(works[column].right() < heads[column + 1].left(), "wrapped comparisons alternate HEAD/work, HEAD/work");
+        }
+        wrapped.grab().save("/tmp/code-review-interleaved-tree.png");
+        QTest::keyClick(&wrapped, Qt::Key_T);
+        const auto flameHeads = wrapped.fileColumnRects("src/pair.cpp", -1);
+        const auto flameWorks = wrapped.fileColumnRects("src/pair.cpp", 1);
+        check(flameHeads.size() > 1 && flameWorks[0].right() < flameHeads[1].left(),
+              "flame layout also interleaves wrapped split columns");
+        wrapped.grab().save("/tmp/code-review-interleaved-boxes.png");
+        const auto fittedZoom = wrapped.zoom();
+        for (auto key : {Qt::Key_PageDown, Qt::Key_PageUp, Qt::Key_Down, Qt::Key_Up}) {
+            QTest::keyClick(&wrapped, key);
+            check(wrapped.isFitView() && wrapped.zoom() == fittedZoom, "vertical navigation preserves fit zoom and wrapping");
+        }
+        QTest::keyClick(&wrapped, Qt::Key_Down);
+        const auto scrolledY = wrapped.camera().y();
+        wrapped.resize(1000, 820); QCoreApplication::processEvents();
+        check(wrapped.isFitView() && wrapped.camera().y() == scrolledY, "resizing does not reset the vertical fit scroll position");
+        auto *verticalBar = wrapped.findChild<QScrollBar *>("verticalScrollBar");
+        verticalBar->setValue(std::min(verticalBar->maximum(), verticalBar->value() + 10000));
+        check(wrapped.isFitView(), "vertical scrollbar preserves Fit");
+        QTest::mousePress(&wrapped, Qt::LeftButton, Qt::NoModifier, QPoint(400, 300));
+        QTest::mouseMove(&wrapped, QPoint(400, 320));
+        QTest::mouseRelease(&wrapped, Qt::LeftButton, Qt::NoModifier, QPoint(400, 320));
+        check(wrapped.isFitView(), "vertical dragging preserves Fit");
+        QTest::mouseClick(&wrapped, Qt::MiddleButton, Qt::NoModifier, QPoint(400, 300));
+        QTest::mouseMove(&wrapped, QPoint(400, 340)); QTest::qWait(40);
+        check(wrapped.isFitView() && wrapped.autoscrolling(), "vertical autoscroll preserves Fit");
+        QTest::keyClick(&wrapped, Qt::Key_Escape);
+        QTest::keyClick(&wrapped, Qt::Key_Home);
+        check(wrapped.isFitView() && wrapped.camera().y() == 56, "Home returns fitted content to the top without unfolding it");
+        wrapped.setDocuments({decode("src/large.cpp", QByteArray("int value = 42;\n").repeated(100000))});
+        const auto largeColumns = wrapped.fileRect("src/large.cpp");
+        check(largeColumns.width() * wrapped.zoom() <= wrapped.width() - 48
+              && wrapped.camera().y() + largeColumns.bottom() * wrapped.zoom() < wrapped.height(),
+              "large-file wrapping fits without leaving source rows below the viewport");
+        wrapped.grab();
+        check(wrapped.textCacheBytes() <= 48 * 1024 * 1024, "continuation columns retain the bounded shared glyph cache");
+        return 0;
+    }
     if (argc == 2) {
         std::atomic_bool cancelled{false};
         Canvas preview(argv[1]); preview.resize(1100, 820); preview.show();
         QTest::qWait(100);
         preview.setDocuments(loadDirectory(argv[1], cancelled));
-        QTest::keyClick(&preview, Qt::Key_F);
+        fitOnce(preview);
         preview.grab().save("/tmp/code-review-directory.png");
         return 0;
     }
@@ -175,7 +385,7 @@ int main(int argc, char **argv) {
     hbar->setValue(hbar->maximum());
     check(canvas.camera().x() < scrollBefore.x(), "horizontal scrollbar moves camera");
     QTest::keyClick(&canvas, Qt::Key_0);
-    QTest::keyClick(&canvas, Qt::Key_F);
+    fitOnce(canvas);
     canvas.grab().save("/tmp/code-review-viewer.png");
     QTest::keyClick(&canvas, Qt::Key_0);
     const QPointF anchor(350, 250);
@@ -197,7 +407,7 @@ int main(int argc, char **argv) {
     QTest::mouseRelease(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(150, 120));
     check(canvas.camera().x() <= before.x() + 50 && canvas.camera().y() <= before.y() + 20
           && canvas.camera() != before, "mouse drag pan respects scene bounds");
-    QTest::keyClick(&canvas, Qt::Key_F);
+    fitOnce(canvas);
     check(canvas.zoom() < 1, "fit all");
     QTest::keyClick(&canvas, Qt::Key_0);
     check(canvas.zoom() == 1 && canvas.camera() == QPointF(24, 56), "reset");
@@ -205,7 +415,7 @@ int main(int argc, char **argv) {
     canvas.setDocuments({decode("sample.cpp", QByteArray("    int value = 42;\n").repeated(100))});
     QWheelEvent overviewZoom(anchor, anchor, {0, -288}, {}, Qt::NoButton, Qt::ControlModifier, Qt::ScrollUpdate, false);
     QApplication::sendEvent(&canvas, &overviewZoom);
-    QTest::keyClick(&canvas, Qt::Key_F);
+    fitOnce(canvas);
     // Fit yields roughly 40%; reduce once more around the upper-left origin.
     QWheelEvent smaller({24, 24}, {24, 24}, {0, -160}, {}, Qt::NoButton, Qt::ControlModifier, Qt::ScrollUpdate, false);
     QApplication::sendEvent(&canvas, &smaller);
@@ -244,7 +454,7 @@ int main(int argc, char **argv) {
         tree.push_back(decode(QString("src/%1/component_%2.cpp").arg(i < 6 ? "canvas" : "model").arg(i), code.repeated(8)));
     canvas.setDocuments(std::move(tree));
     check(canvas.textCacheBytes() == 0, "document replacement invalidates glyph cache");
-    QTest::keyClick(&canvas, Qt::Key_F);
+    fitOnce(canvas);
     canvas.grab().save("/tmp/code-review-tree-lod.png");
     const auto treeFileBeforeZoom = canvas.fileRect("src/canvas/component_0.cpp");
     const auto paletteShot = canvas.grab().toImage();
@@ -280,7 +490,7 @@ int main(int argc, char **argv) {
               "file starts directly beneath its containing directory");
         canvas.grab();
     }
-    QTest::keyClick(&canvas, Qt::Key_F);
+    fitOnce(canvas);
     canvas.grab().save("/tmp/code-review-tree-lod.png");
     zoomTo(1.0);
     const auto fullBox = canvas.directoryBox("");
@@ -299,7 +509,7 @@ int main(int argc, char **argv) {
         dense.push_back(decode(QString("directory_with_name_%1/source.cpp").arg(i), "int value = 42;\n"));
     Canvas crowded(tmp.path()); crowded.show(); QTest::qWait(100);
     crowded.setDocuments(std::move(dense));
-    QTest::keyClick(&crowded, Qt::Key_F);
+    fitOnce(crowded);
     check(crowded.directoryCount() == 51, "dense layout retains every directory");
     const auto a = crowded.fileRect("directory_with_name_0/source.cpp");
     const auto b = crowded.fileRect("directory_with_name_1/source.cpp");
@@ -311,7 +521,7 @@ int main(int argc, char **argv) {
           "directory levels scale with code");
     const QString deepPath = QString("nested/").repeated(40) + "leaf.txt";
     canvas.setDocuments({decode(deepPath, "still visible\n")});
-    QTest::keyClick(&canvas, Qt::Key_F);
+    fitOnce(canvas);
     check(canvas.zoom() > 1e-6 && canvas.directoryCount() == 41,
           "deep trees retain the hierarchy at compact zoom");
     QTest::keyClick(&canvas, Qt::Key_0);
@@ -330,7 +540,7 @@ int main(int argc, char **argv) {
     timer.restart();
     for (int i = 0; i < 30; ++i) canvas.grab();
     fprintf(stdout, "Tests passed; 100,000-line indexing: %lld ms; 10,000-file visible paint average: %.2f ms\n", indexMs, timer.elapsed() / 30.0);
-    QTest::keyClick(&canvas, Qt::Key_F);
+    fitOnce(canvas);
     canvas.grab();
     zoomTo(0.25);
     canvas.grab(); // warm cache
@@ -435,7 +645,7 @@ int main(int argc, char **argv) {
         check(std::abs(fileTop - junction - std::clamp(32 * z, 4.0, 48.0)) < 0.001,
               "file stems scale with zoom and remain below the clear connector fan");
     }
-    QTest::keyClick(&canvas, Qt::Key_F); canvas.grab().save("/tmp/code-review-branch-layout.png");
+    fitOnce(canvas); canvas.grab().save("/tmp/code-review-branch-layout.png");
     QTest::keyClick(&canvas, Qt::Key_T);
     check(!canvas.isTreeView() && canvas.fileRect("a.txt").right() <= canvas.fileRect("b.txt").left(),
           "T restores flame layout");
@@ -644,7 +854,7 @@ int main(int argc, char **argv) {
           && diffLive.fileRect("changed.cpp").width() == normalFileRect.width(),
           "diff toggle preserves file column positions and widths");
     for (const auto &name : {"diffToggle", "splitToggle", "changesToggle", "treeToggle"})
-        check(diffLive.findChild<QToolButton *>(name)->text().contains('['), "each toggle displays its keyboard shortcut");
+        check(diffLive.findChild<QCheckBox *>(name)->text().contains('['), "each toggle displays its keyboard shortcut");
     check(diffLive.findChild<QLabel *>("globalInfo")->text().contains("+4"), "global additions appear at the top left");
     QTest::keyClick(&diffLive, Qt::Key_C);
     waitFor([&] { return diffLive.fileRect("unchanged.txt").isEmpty(); });
@@ -660,8 +870,8 @@ int main(int argc, char **argv) {
     check(std::abs(sharedHeader.left() - (diffLive.camera().x() + diffLive.fileRect("changed.cpp", -1).left() * diffLive.zoom())) < 0.001
           && std::abs(sharedHeader.right() - (diffLive.camera().x() + diffLive.fileRect("changed.cpp", 1).right() * diffLive.zoom())) < 0.001,
           "split copies share one name and counts header spanning the pair");
-    QTest::keyClick(&diffLive, Qt::Key_F); diffLive.grab().save("/tmp/code-review-split-diff.png");
-    QTest::keyClick(&diffLive, Qt::Key_T); QTest::keyClick(&diffLive, Qt::Key_F);
+    fitOnce(diffLive); diffLive.grab().save("/tmp/code-review-split-diff.png");
+    QTest::keyClick(&diffLive, Qt::Key_T); fitOnce(diffLive);
     diffLive.grab().save("/tmp/code-review-split-tree.png");
     check(diffLive.fileRect("changed.cpp", -1).top() == diffLive.fileRect("changed.cpp", 1).top(),
           "tree packing keeps comparison pairs together");
@@ -673,7 +883,7 @@ int main(int argc, char **argv) {
     const double diffHeight = diffLive.fileRect("changed.cpp").height();
     write(diffRepo.filePath("changed.cpp"), QByteArray("int live = 4;\n").repeated(20));
     waitFor([&] { return diffLive.fileRect("changed.cpp").height() > diffHeight; });
-    QTest::mouseClick(diffLive.findChild<QToolButton *>("diffToggle"), Qt::LeftButton);
+    QTest::mouseClick(diffLive.findChild<QCheckBox *>("diffToggle"), Qt::LeftButton, Qt::NoModifier, QPoint(8, 12));
     check(!diffLive.isDiffView() && diffLive.zoom() == 1,
           "diff button toggles independently without resetting the camera zoom");
     check(!diffLive.fileRect("unchanged.txt").isEmpty(), "normal view restores unchanged files");

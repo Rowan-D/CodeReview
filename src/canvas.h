@@ -10,16 +10,18 @@
 #include <QElapsedTimer>
 #include <QProgressBar>
 #include <QToolButton>
+#include <QCheckBox>
 #include <QLabel>
 
 class Canvas : public QWidget {
 public:
-    explicit Canvas(const QString &root);
+    explicit Canvas(const QString &root, bool watchDirectory = true);
     ~Canvas() override;
     void setDocuments(std::vector<Document> docs);
     double zoom() const { return scale; }
     QPointF camera() const { return offset; }
     QRectF fileRect(const QString &path, int side = 0) const;
+    std::vector<QRectF> fileColumnRects(const QString &path, int side = 0) const;
     QRectF contentRect(const QString &path) const;
     QRectF fileHeaderRect(const QString &path) const;
     bool isCollapsed(const QString &path) const;
@@ -32,6 +34,7 @@ public:
     bool isSplitView() const { return splitView; }
     bool isChangesOnly() const { return changesOnly; }
     bool isTreeView() const { return treeView; }
+    bool isFitView() const { return fitView; }
     qsizetype addedLines() const { return workspace.added; }
     qsizetype removedLines() const { return workspace.removed; }
 protected:
@@ -70,7 +73,8 @@ private:
     qsizetype slotAt(double screenX) const;
     qsizetype slotNear(QPointF point) const;
     void updateBounds();
-    void changed();
+    void changed(bool refit = true);
+    void panBy(QPointF delta);
     void constrainCamera();
     void stopAutoscroll();
     void tickAutoscroll();
@@ -79,6 +83,7 @@ private:
     QRectF leafRect(qsizetype slot) const;
     QRectF headerRect(qsizetype slot) const;
     QRectF sharedHeaderRect(int node) const;
+    QRectF expandedFileHeaderRect(int node) const;
     void drawFileHeader(QPainter &p, int node);
     bool binaryControlVisible(int node) const;
     void drawDirectories(QPainter &p, int node, qsizetype first, qsizetype end);
@@ -88,7 +93,12 @@ private:
     const QImage &textTile(qsizetype document, qsizetype tile);
     void drawTextRow(QPainter &p, const Document &d, qsizetype row, double y);
     void zoomAt(double factor, QPointF anchor);
-    void fit();
+    void fit(bool resetPosition = false);
+    double columnLeft(int node, int column) const;
+    double fileColumnWidth(int node) const;
+    qsizetype bodyRows(int node, bool reserve = false) const;
+    int fileColumns(int node) const;
+    void disableFit();
     std::vector<Document> documents;
     std::vector<Node> nodes;
     std::vector<int> leaves;
@@ -109,9 +119,14 @@ private:
     QTimer refreshTimer;
     QTimer progressTimer;
     QProgressBar *loadingBar = nullptr;
-    QToolButton *viewToggle = nullptr, *splitToggle = nullptr, *changesToggle = nullptr, *treeToggle = nullptr;
+    QCheckBox *viewToggle = nullptr, *splitToggle = nullptr, *changesToggle = nullptr, *treeToggle = nullptr;
+    QCheckBox *fitToggle = nullptr, *wrapToggle = nullptr;
+    QToolButton *diffExpand = nullptr, *fitExpand = nullptr;
+    QWidget *controlPanel = nullptr;
     QLabel *globalInfo = nullptr;
     bool diffView = false, splitView = false, changesOnly = false, treeView = false;
+    bool fitView = false, wrapFit = false;
+    qsizetype wrapRows = 0;
     WorkspaceSnapshot workspace;
     ViewOptions requestedOptions;
     std::atomic_int loadProgress{-1};
